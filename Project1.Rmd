@@ -1,0 +1,612 @@
+---
+title: "Analysis of Traffic Stops in Connecticut"
+output:
+  html_document: default
+  pdf_document: default
+  word_document: default
+---
+
+```{=html}
+<style>
+h1.title {
+  text-align: center;
+}
+
+h4.author {
+  text-align: center;
+}
+</style>
+```
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(warning=FALSE)
+```
+
+# Section 1: Introduction
+
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;This dataset contains information about traffic stops conducted by the Connecticut State Police Department. This dataset ranges from October 2013 to March 2015. This data was used to develop a model to predict the outcome of a traffic stop and whether a search was conducted. We first transformed the dataset for logistic regression modeling to include fewer extreme values and to make it normal by looking at the distributions of predictor variables and identifying any skewness. We did this by analyzing relationships between different predictor variables and looking at relationships between predictor variables and stop outcomes. We used different graphs such as box plots, histograms, KDE plots, and stacked bar plots to analyze these relationships. This helped us analyze what factors influence the likelihood of various outcomes of traffic stops, which can range from a verbal warning to an arrest. A few of the predictor variables we used were search type, contraband found, and when the stop occurred (month and time). For part two, we will create logistic models to predict whether contraband was found after a search by using race and other predictors. From there, we will select a model, optimize the threshold for accuracy, summarize our results, and test the accuracy of our model on a test dataset.
+
+# Section 2: Exploring and Transforming the Data
+
+```{r, echo=FALSE, message=FALSE}
+# Import ct_stops and necessary libraries
+library(ggplot2)
+library(lubridate)
+library(tidyverse)
+library(dplyr)
+library(gridExtra)
+library(patchwork)
+library(inspectdf)
+
+# Read in ct_stops
+ct_stops <- read.csv("CT_stops.csv")
+attach(ct_stops)
+```
+
+#### **Description of the Data**
+
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;This dataset contains many variables characterizing traffic stops, in total nearly 270,000 rows, each of which represents a single stop. Each row includes basic information pertaining to the stop like the date, time, county, officer, and length of the stop. It also includes demographic information about each driver, such as gender, age, and race. Along with these predictor variables, each row also includes attributes pertaining to the outcome of each stop, such as the type of violation, if a search was conducted, type of search, if a contraband was found, the stop outcome, and if the driver was arrested.
+
+#### **Cleaning the data:**
+
+```{r, echo=FALSE, message=FALSE}
+## Cleaning the ct_stops
+ct_stops= ct_stops[, c('stop_date', 'stop_time', 'county_name', 'county_fips', 'driver_gender', 'driver_age' , 'driver_race', 'violation', 'search_conducted', 'search_type', 'contraband_found', 'stop_outcome', 'is_arrested', 'officer_id', 'stop_duration')]
+
+# Deal with missing values
+# Values with search type NA indicate that there was no search conducted.
+# We will replace NA values with "no search" for ease in working with this variable
+ct_stops <- ct_stops %>%
+  mutate(search_type = ifelse(is.na(search_type), "No Search", search_type))
+
+# Drop any rows with missing values for column stop_outcome
+ct_stops <- subset(ct_stops, !is.na(stop_outcome))
+
+#check how many NA values are still in the data set
+#there are still 340 rows with missing values, the majority are in driver_age and stop_time, 33 in county_name and county_fips
+#imputing these values could create issues with our model, it's best to drop them
+ct_stops <- subset(ct_stops, !is.na(driver_age))
+ct_stops <- subset(ct_stops, !is.na(stop_time))
+ct_stops <- subset(ct_stops, !is.na(county_name))
+
+
+# Change stop time into intervals for ease in visualizations and analysis
+ct_stops <- ct_stops %>%
+  mutate(
+    stop_time_new = hour(hms(stop_time)) + minute(hms(stop_time))/60 + second(hms(stop_time))/3600,
+    time_category = case_when(
+      stop_time_new >= 0 & stop_time_new < 6 ~ "12am-6am",
+      stop_time_new >= 6 & stop_time_new < 12 ~ "6am-12pm",
+      stop_time_new >= 12 & stop_time_new < 18 ~ "12pm-6pm",
+      stop_time_new >= 18 & stop_time_new <= 24 ~ "6pm-12am"
+    )
+  )
+
+# Add new variable for month ct_stops
+ct_stops <- ct_stops %>%
+  mutate(stop_month = as.Date(stop_date, format = "%Y-%m-%d")) %>%
+  mutate(stop_month = month(stop_month, label = TRUE, abbr = TRUE))
+
+```
+
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;To start, we removed duplicate "raw" columns of the data set that had a cleaned uniform version. These columns were not necessary and were removed. In dealing with NA values in the data set, we first changed any NA values in the column search_type to be "no search", as these were stops where a search was not conducted. The majority of other NA values came from the columns, stop outcome and whether an arrest was made. We decided to drop these rows because knowing the stop outcome is crucial for our model. We can justify the dropping of these rows because they make up 1.67% of the total rows in the data set, which is a small fraction of the data. 340 rows remained with with NA values in either driver_age, stop_time, or county_name. These rows were dropped because we felt that imputation techniques could create skewed patterns, and because these rows make up 0.129% of the data, dropping was a reasonable solution. We also created two new columns that grouped the time of the stop into intervals and the date of the stop into month categories for ease in analysis and visualization.
+
+#### **Transformations:**
+
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;While exploring the quantitative variables, we found that the driver age variable was significantly right skewed with many high outliers. To fix the distribution to match a more normal distribution, we took the natural log of the age values. The other quantitative variable in the dataset was stop time. However, we did not believe a transformation was necessary as the data was not very skewed and also had no outliers.
+
+```{r, echo=FALSE, message=FALSE}
+# Transform driver age
+ct_stops$driver_age_new <- log(ct_stops$driver_age)
+attach(ct_stops)
+```
+
+#### **Relationships between predictor variables and stop outcome:**
+
+```{r, echo=FALSE}
+# Barplot to show the relationship between search type and stop outcome
+p1 <- ggplot(ct_stops, aes(x = search_type, fill = stop_outcome)) +
+  geom_bar(position = "fill") +
+  labs(title = "Figure 1: Stop Outcome by Search Type",
+       x = "Search Type",
+       fill= "Stop Outcome") +
+  theme_classic()+
+  scale_y_continuous(labels = scales::percent) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        axis.title.y = element_blank(),
+        plot.title = element_text(size = 9.5, hjust = 0.5)) +
+  scale_fill_viridis_d()
+
+# Barplot to show the relationship between if contraband was found and stop outcome
+p2 <- ggplot(ct_stops, aes(x = contraband_found, fill = stop_outcome)) +
+  geom_bar(position = "fill") +
+  labs(title = "Figure 2: Stop Outcome by Contraband Found",
+       x = "Contraband Found",
+       fill = "Stop Outcome") +
+  scale_y_continuous(labels = scales::percent) +
+  scale_x_discrete(labels = c("TRUE" = "Yes", "FALSE" = "No")) +
+  theme_classic() +
+  theme(axis.title.y = element_blank(),
+        plot.title = element_text(size = 9.5)) +
+  scale_fill_viridis_d()
+
+# Combine plots to be laid out nicely
+combined_plot <- p1 + p2 + plot_layout(guides = "collect") & theme(legend.position = "right")
+print(combined_plot)
+```
+
+```{r, echo=FALSE, include=FALSE}
+# Calculate proportions to better explain graphs
+proportions_by_search_type <- ct_stops %>%
+  group_by(search_type) %>%  # Group by search type
+  summarise(
+    total_stops = n(),  # Count total stops with contraband for each search type
+    arrests = sum(is_arrested == TRUE),  # Count arrests for each search type
+    proportion_arrests = arrests / total_stops  # Calculate proportion
+  )
+print(proportions_by_search_type)
+
+no_search_ticket_percentage <- ct_stops %>%
+  filter(search_type == "No Search") %>%  # Filter for stops with no search
+  summarise(
+    total_no_search_stops = n(),  # Total stops with no search
+    ticket_count = sum(stop_outcome == "Ticket"),  # Count of tickets among no-search stops
+    ticket_percentage = (ticket_count / total_no_search_stops) * 100  # Calculate percentage
+  )
+print(no_search_ticket_percentage)
+
+contraband_arrest_percentage <- ct_stops %>%
+  filter(contraband_found == TRUE) %>%  # Filter for stops where contraband was found
+  summarise(
+    total_stops_with_contraband = n(),  # Count total stops with contraband
+    arrests = sum(is_arrested == TRUE),  # Count arrests among those stops
+    percentage_arrests = (arrests / total_stops_with_contraband) * 100  # Calculate percentage
+  )
+print(contraband_arrest_percentage)
+
+no_contraband_arrest_percentage <- ct_stops %>%
+  filter(contraband_found == FALSE) %>%  # Filter for stops where contraband was found
+  summarise(
+    total_stops_with_contraband = n(),  # Count total stops with contraband
+    arrests = sum(is_arrested == TRUE),  # Count arrests among those stops
+    percentage_arrests = (arrests / total_stops_with_contraband) * 100  # Calculate percentage
+  )
+print(no_contraband_arrest_percentage)
+
+warning_no_contraband <- ct_stops %>%
+  filter(contraband_found == FALSE) %>%  # Filter for stops without contraband
+  summarise(
+    total_no_contraband = n(),  # Count total stops without contraband
+    warnings = sum(stop_outcome %in% c("Written Warning", "Verbal Warning")),  # Count warnings
+    percentage_warnings = (warnings / total_no_contraband) * 100  # Calculate percentage
+  )
+print(warning_no_contraband)
+
+# Calculate percentage for stops where contraband was FOUND
+warning_with_contraband <- ct_stops %>%
+  filter(contraband_found == TRUE) %>%  # Filter for stops with contraband
+  summarise(
+    total_with_contraband = n(),  # Count total stops with contraband
+    warnings = sum(stop_outcome %in% c("Written Warning", "Verbal Warning")),  # Count warnings
+    percentage_warnings = (warnings / total_with_contraband) * 100  # Calculate percentage
+  )
+print(warning_with_contraband)
+```
+
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;Figure 1 explores the relationship between the type of search that was conducted and the outcome of the stop. This figure shows that 77% of inventory searches resulted in an arrest compared to other search types where only a small proportion resulted in arrests. On the other hand, we can see that 70% of those who were not searched resulted in a ticket. This shows that the predictor variable, search type, has an effect on the response variable, because different search type's result in different stop outcomes.
+
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;Figure 2 highlights the impact of contraband discovery on stop outcomes. When looking at the figure, we can see that 32% of stops where contraband was found resulted in an arrest, whereas only 2% of stops where contraband was not found resulted in an arrest. Conversely, 24% of stops where contraband was not found resulted in a written or verbal warning, whereas only 5% of stops where contraband was found resulted in a written or verbal warning.
+
+Note: We also explored other relationships between predictor variables and different stop outcomes, however, these were the relationships that behaved most differently between outcomes.
+
+#### **Relationships between predictor variables:**
+
+```{r, echo=FALSE, message=FALSE}
+library(viridis)
+#TIME OF DAY AND MONTH OF YEAR PLOTS
+
+# Create small df for plotting
+month_plot = ct_stops[, c('stop_month' ,'time_category')]
+
+# Group by the month and time category
+month_plot <- month_plot %>%
+  group_by(stop_month, time_category) %>%
+  summarise(count = n()) %>%
+  ungroup()
+
+# Turn the counts into proportions for each month
+month_plot <- month_plot %>%
+  group_by(stop_month) %>%
+  mutate(total = sum(count),proportions = count / total) %>%
+  ungroup()
+
+# Add levels for time_category for plotting order
+month_plot$time_category <- factor(month_plot$time_category,
+                                   levels = c("12am-6am", "6am-12pm", "12pm-6pm", "6pm-12am"))
+
+
+#plot
+pp2 <- ggplot(month_plot, aes(x = stop_month, y = proportions, fill = time_category)) + geom_bar(stat = "identity") + theme_classic() +scale_fill_viridis_d() +
+  labs(x = "Month", y = "Number of Stops", title = "Figure 3: Proportion of Stops by Month", fill= "Time of Day") +
+  theme(plot.title = element_text(hjust = 0.5))
+
+pp2
+```
+
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;Although now visually shown in Figure 3, the most stops occurred in the month of March, followed by October and then November. Figure 3 does visualize that the proportion of stops based on time of day changes from month to month. Stops increase in the 12pm-6pm and 6pm-12am intervals and decrease for the intervals 12am-6am and 6am-12pm intervals for the months April through September. This seems to be the most notable trend in difference in proportions. Overall there seems to be a common trend in stops for colder months October through March compared to warmer months April through September. The months October through March have a higher average stop count, and a difference in stop occurance throughout the day.
+
+```{r, echo=FALSE, message=FALSE}
+# Barplot comparing driver race and stop duration
+p1 <- ggplot(ct_stops, aes(x = driver_race, fill = stop_duration)) +
+  geom_bar(position = "fill") +
+  labs(title = "Figure 4: Stop Duration by Driver Race",
+       x = "Driver Race",
+       y = "Proportion",
+       fill = "Stop Duration") +
+  theme_classic() +
+  scale_y_continuous(labels = scales::percent) +
+  theme(plot.title = element_text(size = 10, hjust = 0.5),
+        legend.position = "bottom",
+        legend.title = element_text(hjust = 0.5),
+        legend.box = "horizontal",
+        axis.text.x = element_text(angle = 45, hjust = 1)) +
+  scale_fill_viridis_d() +
+  guides(fill = guide_legend(title.position = "top"))
+
+# Density plot comparing driver age and if a search was conducted
+p2 <- ggplot(ct_stops, aes(x = driver_age, fill = factor(search_conducted))) +
+  geom_density(alpha = 0.5) +
+  labs(title = "Figure 5: Search Conducted by Driver Age",
+       x = "Driver Age",
+       y = "Density",
+       fill = "Search Conducted") +
+  theme_classic () +
+  theme(plot.title = element_text(size = 10, hjust = 0.5),
+        legend.position = "bottom",
+        legend.title = element_text(hjust = 0.5),
+        legend.box = "horizontal") +
+  scale_fill_viridis_d(option = "C") +
+  guides(fill = guide_legend(title.position = "top")) +
+  scale_x_continuous(breaks = seq(min(ct_stops$driver_age, na.rm = TRUE), max(ct_stops$driver_age, na.rm = TRUE), by = 10))
+
+combined_plot <- p1 + p2
+
+print(combined_plot)
+```
+
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;Figure 4 shows the relationship between a driver's race and the duration of the stop. Looking at the distributions, notice how Hispanic people, followed by Black people, and then followed by White, Asian and other races were generally stopped for a longer amount of time. Another important thing to note is that there were significantly more white people in the data compared to the other races, which makes this difference even more prominent.
+
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;Figure 5 shows the relationship between a driver's age and if a search was conducted or not. Looking at the curves, notice that generally younger people, aged 15 to 36 were searched more compared to older people, aged 37 to 99.
+
+# **Section 3: The Logistic Model**
+
+```{r, echo=FALSE, include=FALSE}
+library(caret)
+library(glmnet)
+library(pROC)
+library(dplyr)
+
+# Remove rows with no search conducted
+ct_stops <- subset(ct_stops, search_type != "No Search")
+
+# Subset for only search conducted cases
+search_stops <- subset(ct_stops, search_conducted == TRUE)
+
+categorize_violation <- function(data) {
+    # Combine cell phone violations
+    data <- data %>%
+      mutate(violation = if_else(grepl("Cell phone", violation),
+            "Cell phone violation", violation))
+    data <- data %>%
+      mutate(violation = if_else(grepl("Equipment", violation),
+           "Equipment violation", violation))
+    data <- data %>%
+      mutate(violation = if_else(grepl("License", violation),
+           "License violation", violation))
+    data <- data %>%
+      mutate(violation = if_else(grepl("Lights", violation),
+           "Lights violation",violation))
+    data <- data %>%
+      mutate(violation = if_else(grepl("Moving", violation),
+           "Moving violation", violation))
+    data <- data %>%
+      mutate(violation = if_else(grepl("Other", violation),
+           "Other violation", violation))
+    data <- data %>%
+      mutate(violation = if_else(grepl("Registration", violation),
+            "Registration violation", violation))
+    data <- data %>%
+      mutate(violation = if_else(grepl("Safe movement", violation),
+            "Safe movement violation", violation))
+    data <- data %>%
+      mutate(violation = if_else(grepl("Seat belt", violation),
+            "Seat belt violation", violation))
+    data <- data %>%
+      mutate(violation = if_else(grepl("Speeding", violation),
+            "Speeding violation", violation))
+}
+search_stops <- categorize_violation(search_stops)
+
+# Categorize time into four periods
+categorize_time2 <- function(hours) {
+  if (is.na(hours)) {
+    return("NA")
+  } else if (hours >= 0 && hours < 6) {
+    return("12am-6am")
+  } else if (hours >= 6 && hours < 12) {
+    return("6am-12pm")
+  } else if (hours >= 12 && hours < 18) {
+    return("12pm-6pm")
+  } else {
+    return("6pm-12am")
+  }
+}
+
+#Categorize stop_month by season
+search_stops <- search_stops %>%
+  mutate(season = case_when(
+    stop_month %in% c("Mar", "Apr", "May") ~ "Spring",
+    stop_month %in% c("Jun", "Jul", "Aug") ~ "Summer",
+    stop_month %in% c("Sep", "Oct", "Nov") ~ "Fall",
+    stop_month %in% c("Dec", "Jan", "Feb") ~ "Winter"
+  ))
+
+
+# Add time category column
+search_stops <- search_stops %>%
+  mutate(time_category = sapply(stop_time_new, categorize_time2))
+
+# Convert driver race and gender to factors
+search_stops$driver_race <- as.factor(search_stops$driver_race)
+search_stops$driver_gender <- as.factor(search_stops$driver_gender)
+
+#splitting test and training
+  set.seed(42)
+  train.inds <- sample(1:nrow(search_stops), floor(.75*nrow(search_stops)), replace=F)
+  dat.tr <- search_stops[train.inds,]
+  dat.te <- search_stops[-train.inds,]
+
+#Train our models
+  BaselineModel <-  glm(contraband_found ~ driver_race + driver_age_new + driver_gender + stop_duration + search_type + time_category + county_name + season + violation, data = dat.tr, family = binomial)
+
+#Record predictions using the fitted model
+#Record predictions using the fitted model
+  pred.mat <- matrix(NA, nrow = nrow(dat.te), ncol = 1)
+  pred.mat[, 1] <- predict(BaselineModel, newdata = dat.te, type = "response")
+  results <- data.frame(actual = dat.te$contraband_found, pred1 = pred.mat[, 1])
+  results$predicted1 <- ifelse(results$pred1 > 0.5, 1, 0)
+  predy.opt <- ifelse(results$pred1 > 0.5, 1, 0)
+  tab.opt <- table(dat.te$contraband_found, predy.opt)
+  rownames(tab.opt) <- c("Obs=0", "Obs=1");
+  colnames(tab.opt) <- c("Pred=0", "Pred=1")
+
+#Calculating accuracy, sensitivity and specificity
+TP <- tab.opt[2, 2]  # True positives
+TN <- tab.opt[1, 1]  # True negatives
+FP <- tab.opt[1, 2]  # False positives
+FN <- tab.opt[2, 1]  # False negatives
+
+# Calculate metrics
+accuracy <- (TP + TN) / sum(tab.opt)
+sensitivity <- TP / (TP + FN)
+specificity <- TN / (TN + FP)
+  accuracy
+  sensitivity
+  specificity
+
+#calculating the percent of total times contraband was found to see if it is assuming everything is false or true
+  actual_true_percentage <- mean(1- dat.te$contraband_found == 1) * 100
+  actual_true_percentage
+```
+
+```{r, echo=FALSE, message=FALSE}
+#Contingency Table
+  cat("Contingency Table\n")
+  cat("Table 1: Confusion Matrix for Contraband Prediction\n")
+  print(tab.opt)
+
+#ROC curve
+  rocfit <- roc(dat.te$contraband_found, results$pred1)
+  plot(rocfit)
+```
+
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;The first thing we did to make a model to predict contraband being found was to look only at the officer stops where they decided to search the vehicle. From there, We split the data into a training set (75%) to make our model and a testing set (25%) to test it. We used driver race, driver age (logged), driver gender, stop duration, search type, time of day, county, season, and violation as predictors in our baseline model. We did not pick use stop outcome or is arrested because those variables are not known when the officer decides to search a vehicle. Whereas even during the stop duration, the officer would know what time he is on track before deciding to search a vehicle. We used a threshold of .5 for binary classification on whether contraband would be found. If the model predicted the odds of contraband being found to be over .5, it would predict contraband being found; otherwise, it would not predict that nothing was found.
+
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;After creating the model, we examined the accuracy, specificity, and sensitivity of the model on the test set. We found an accuracy of 0.651, a sensitivity of 0.36, and a specificity of 0.832. We also made a contingency table for our results, as seen in Table 1. This model works okay with accuracy and specificity; however, the sensitivity is really low, so it is bad at predicting true positives (When contraband is found). The model also gives every variable a non-zero coefficient, so it uses every variable and does not exclude any that are ineffective in predicting, which is not ideal. Also, a threshold of .5 is not good because the model has trouble finding true positives. It implies that the threshold is too high. The probability threshold of it being true, leading to it being labeled true, should be lowered.
+
+# **Section 4: Model Selection**
+
+```{r, echo=FALSE}
+# Convert training data to matrix format, required for the package
+xx <- model.matrix(contraband_found~ driver_race + driver_age_new + driver_gender + stop_duration + search_type + time_category + county_name + season + violation, dat.tr)
+yy <- dat.tr$contraband_found # packages requires this to be numeric
+
+# Fit the lasso logistic regression
+lasso.out <- cv.glmnet(xx, yy, family = "binomial", alpha = 1, type.measure = "class")
+# Explain why we choose to use this
+coef(lasso.out, s = lasso.out$lambda.min)
+```
+
+```{r, echo=FALSE, include=FALSE}
+#Set up the Lasso model and evaluate training
+# We fit a new model to the training data because we dropped out a predictor, seasons, based on the coefficients of the lasso
+mod.lasso <- glm(contraband_found~ driver_race + driver_age_new + driver_gender + stop_duration + search_type + time_category + county_name + violation, family=binomial, data=dat.tr)
+preds.tr.lasso <- predict.glm(mod.lasso, type="response")
+pred.tr.lasso <- preds.tr.lasso > 0.5 #convert probs to binary
+pred.tr.table.lasso <- table(pred.tr.lasso, dat.tr$contraband_found) #columns are observed
+
+#Sensitivity on training
+pred.tr.table.lasso[2,2]/sum(pred.tr.table.lasso[,2]);
+#Specificity on training
+pred.tr.table.lasso[1,1]/sum(pred.tr.table.lasso[,1]);
+#Accuracy on training
+mean(pred.tr.lasso == dat.tr$contraband_found)
+
+#Fit model to testing data to evaluate testing data
+preds.te.lasso <- predict.glm(mod.lasso, type="response", newdata=dat.te)
+pred.te.lasso <- preds.te.lasso > 0.5 # convert probs to binary
+pred.te.table.lasso <- table(pred.te.lasso, dat.te$contraband_found) # columns are observed
+
+#Sensitivity on testing
+pred.te.table.lasso[2,2]/sum(pred.te.table.lasso[,2]);
+#Specificity on testing
+pred.te.table.lasso[1,1]/sum(pred.te.table.lasso[,1]);
+#Accuracy on testing
+mean(pred.te.lasso == dat.te$contraband_found)
+```
+
+```{r, echo=FALSE, message=FALSE, include=FALSE}
+# Find rocfit curve for testing data
+rocfit2 <- roc(dat.te$contraband_found, preds.te.lasso)
+plot(rocfit2)
+```
+
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;We chose to use Lasso regression for model selection because Lasso regression applies regularization and feature selection. Different from other model selection techniques, Lasso applies a penalty that encourages the model to shrink certain coefficients to zero. Therefore, Lasso regression removes less important predictors from the model. This makes the model simpler, more interpretable, and reduces overfitting because only relevant features are retained. Overall, Lasso regression balances between predictive accuracy and interpretability, so we decided to use this as our model selection procedure.
+
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;In the model chosen by Lasso regression, only one predictor was removed from the baseline model. This predictor was which season the stop occurred in, and by removing it, our model becomes slightly simpler to interpret. Comparing the results of our baseline model and what we deemed to be our best model, we see that accuracy increases slightly. In our baseline model, we had an accuracy of 65.15% and for the best model we had an accuracy of 65.54%. Our sensitivity and specificity also increased slightly from our baseline model to our best model. For our baseline model, sensitivity was 36.01% and specificity was 83.17%. In our best model, sensitivity was 36.27% and specificity was 83.65%. Although these changes between the baseline model and our best model are small, they reflect gains in all metrics, without sacrificing one metric for another. This indicates that the model selected through Lasso regression provides a more balanced and effective model.
+
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;Looking at both models, we see that sensitivity is fairly low and specificity is fairly high. This is likely due to the fact that there are many more times where contraband is not found compared to contraband being found. Since there are more cases where contraband is not found, the model may learn to classify most of the cases as negative because it will more likely be correct that way. Specificity measures the true negative rate, so in a dataset where there are many more negative data points, it is much easier for the model to correctly identify negative cases. Therefore, it makes sense that our specificity is higher and sensitivity is lower for both models, because sensitivity measures the true positive rate.
+
+# Section 5: Optimizing the Threshold for Accuracy
+
+```{r, echo=FALSE, message=FALSE}
+# Find optimal threshold
+rocfit <- roc(dat.te$contraband_found, preds.te.lasso)
+
+metrics <- rocfit$sensitivities + rocfit$specificities
+max.metric.ind <- which(metrics == max(metrics))
+opt.threshold <- rocfit$thresholds[max.metric.ind]
+
+# Define a sequence of thresholds to loop through
+thresholds <- seq(0, 1, by = 0.01)
+
+# Store accuracies, sensitivities, and specificities
+accuracies <- numeric(length(thresholds))
+sensitivities <- numeric(length(thresholds))
+specificities <- numeric(length(thresholds))
+
+# Loop through each threshold to calculate accuracy
+for (i in seq_along(thresholds)) {
+  threshold <- thresholds[i]
+
+  # Predict outcome based on the current threshold
+  predy.opt <- ifelse(preds.te.lasso > threshold, 1, 0)
+
+  # Calculate and store accuracy
+  tab.opt <- table(dat.te$contraband_found, predy.opt)
+  accuracy <- sum(diag(tab.opt)) / sum(tab.opt)
+  accuracies[i] <- accuracy
+
+  # Calculate sensitivity and specificity
+  if (nrow(tab.opt) == 2 && ncol(tab.opt) == 2) {
+    sensitivities[i] <- tab.opt[2,2] / sum(tab.opt[2,])
+    specificities[i] <- tab.opt[1,1] / sum(tab.opt[1,])
+  }
+}
+
+# Create a data frame to use for plots
+accuracy_data <- data.frame(Threshold = thresholds, Accuracy = accuracies, Sensitivity = sensitivities, Specificity = specificities)
+
+# Plot accuracy vs threshold with sensitivity and specificity
+ggplot(accuracy_data, aes(x = Threshold)) +
+  geom_line(aes(y = Accuracy, color = "Accuracy"), size = 1) +
+  geom_line(aes(y = Sensitivity, color = "Sensitivity"), size = 1, linetype = "dashed") +
+  geom_line(aes(y = Specificity, color = "Specificity"), size = 1, linetype = "dashed") +
+  geom_vline(xintercept = opt.threshold, color = "black", size = 1) +  # Optimal threshold line
+  annotate("text", x = opt.threshold, y = 1, label = paste("Optimal Threshold =", round(opt.threshold, 2)),
+           color = "black", vjust = 13, hjust = -0.03) +
+  labs(title = "Figure 6: Accuracy vs Threshold",
+       x = "Threshold", y = "Accuracy") +
+  scale_color_manual(name = "Metric",
+                     values = c("Accuracy" = "#999999", "Sensitivity" = "#56B4E9", "Specificity" = "#CC79A7")) +
+  theme_classic() +
+  theme(plot.title = element_text(size = 15, hjust = 0.5))
+
+# Find the optimal threshold based on maximum accuracy
+max.accuracy.index <- which.max(accuracies)
+opt.threshold.accuracy <- thresholds[max.accuracy.index]
+
+# Get the accuracy at the optimal threshold
+opt.index <- which.min(abs(thresholds - opt.threshold))
+opt.accuracy <- accuracies[opt.index]
+
+
+# Calculate the proportion of falses in contraband_found
+#736/(373+736)
+```
+
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;Figure 6 shows the relationship between accuracies and threshold for our model, showing that the threshold that maximizes accuracy in predicting the outcome of a contraband being found correctly is 0.36 with a corresponding accuracy of 0.64. Notice the graph starts with a high accuracy of about 0.66 at a threshold of 0. This is because here it is predicting all cases as false, which is about 66% of the cases in our test data. Accuracy then drops to about 0.34 once the threshold increases past 0, because it is now predicting all cases as true, which is about 34% of the cases in our data. Accuracy then slowly rises to our optimal threshold of 0.36, and then eventually plateaus to return to an accuracy of 0.66, predicting all cases as false again.
+
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;An important thing to note is that the optimal threshold for accuracy is not quite at the highest accuracy point on the graph. This is due how we calculated the optimal threshold, by maximizing the sum of sensitivity and specificity. If we were to increase our optimal threshold to the highest accuracy, we would then sacrifice sensitivity and specificity. As threshold increases from 0.36 to 0.44 (where our highest accuracy point is), specificity increases, but sensitivity decreases, which is not ideal since our goal is to be most accurate in predicting correct true cases of contraband found.
+
+# **Section 6: Results Summary**
+
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;Through data exploration, transformation, and model selection, we have found our best logistic model for predicting if contraband was found after a search was conducted during a traffic stop. This model includes data on driver race, driver age, driver gender, stop duration, search type, time category, county, and violation. Our final model removes season completely when compared to the baseline by forcing all coefficients to be 0. Certain violations and stop durations, counties, search types, and driver races were also forced to have 0 coefficients. Our model also changes the coefficients of each predictor, and overall our model found through lasso regression performs slightly better than the chosen baseline in terms of overall accuracy, specificity, and sensitivity. Our best threshold that maximizes sensitivity and specificity is .36, and when performed on the testing data the accuracy was 65.54%, sensitivity was 36.27% and specificity was 83.65%, which were all better than our baseline model.
+
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;Our final model suggests that race does influence the likelihood of contraband being found during a traffic stop. Our baseline race classification was 'Asian', and 'Hispanic' race was the only classification that wasn't seen to make a notable difference in our model. 'Black', 'White', and 'Other' all had changing coefficients from the baseline.
+
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;Our final model also suggests that if a search took place for 30 more more minutes there is a higher chance of contraband being found. Our baseline for this predictor was 1-15 minutes, and the range 15-30 was not found to be different enough in from the baseline. Because of this, the coefficient was driven to 0.
+
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;The county a stop took place in also has an impact on the likelihood of contraband being found as an outcome of a traffic stop. Our baseline county in the model is Fairfield County. New Haven and New London counties were not found be significantly different enough from our baseline to warrant coefficients in our model, but all other counties were. Interestingly enough Hartford County presents a negative coefficient in our model, suggesting that if the stop occurs in this county, the likelihood of contraband being found is lower than all other counties. Middlesex County has the highest coefficient compared to other counties in our model, suggesting that if the stop is occurring in this county, the probability of contraband being found is higher compared to others.
+
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;Considering violation types, our baseline violation in our model is a 'cell phone violation'. Violations that were driven to 0 in our model include 'equipment violation', 'lights violation', 'seat belt violation', and 'stop sign violation'. Violations 'license', 'moving', and 'registration' all had small negative coefficients, indicating that if a traffic stop occurred for any of these reasons, the likelihood of a contraband being found if a search was conducted is smaller compared to baseline violations. 'Other' and 'safe movement' violations both had high positive coefficients. If a stop and search occurred as a result of these violations, the chance of contraband being found is higher compared to baseline violations.
+
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;Having more detailed descriptions on what 'other' entails in multiple predictor variables could be useful in increasing accuracy in our model. Features like race, stop violation, and search type all have 'other' describing data that doesn't fit into their other groupings. Understanding these variables may be helpful and could increase accuracy. 
+
+
+```{r, echo=FALSE, message=FALSE}
+#read in prediction data
+ct_pred <- read.csv("CT_prediction_set.csv")
+
+#drop rows where a search wasn't conducted along with redundant columns
+ct_pred <- subset(ct_pred, search_conducted == TRUE)
+ct_pred= ct_pred[, c('id','stop_date', 'stop_time', 'county_name', 'driver_gender', 'driver_age' , 'driver_race', 'violation', 'search_conducted', 'search_type', 'stop_outcome', 'is_arrested', 'stop_duration')]
+
+#create variables needed and do transformations
+#transform driver age
+ct_pred$driver_age_new <- log(ct_pred$driver_age)
+
+# Convert driver race and gender to factors
+ct_pred$driver_race <- as.factor(ct_pred$driver_race)
+ct_pred$driver_gender <- as.factor(ct_pred$driver_gender)
+  
+#create time of day info
+ct_pred <- ct_pred %>%
+mutate(
+  stop_time_new = hour(hms(stop_time)) + minute(hms(stop_time))/60 + second(hms(stop_time))/3600,
+  time_category = case_when(
+    stop_time_new >= 0 & stop_time_new < 6 ~ "12am-6am",
+    stop_time_new >= 6 & stop_time_new < 12 ~ "6am-12pm",
+    stop_time_new >= 12 & stop_time_new < 18 ~ "12pm-6pm",
+    stop_time_new >= 18 & stop_time_new <= 24 ~ "6pm-12am"
+  ))
+  
+
+# Add new variable for month ct_stops
+ct_pred <- ct_pred %>%
+  mutate(stop_month = as.Date(stop_date, format = "%Y-%m-%d")) %>%
+   mutate(stop_month = month(stop_month, label = TRUE, abbr = TRUE))
+#Group Months into Seasons
+ct_pred <- ct_pred %>%
+  mutate(season = case_when(
+    stop_month %in% c("Mar", "Apr", "May") ~ "Spring",
+    stop_month %in% c("Jun", "Jul", "Aug") ~ "Summer",
+    stop_month %in% c("Sep", "Oct", "Nov") ~ "Fall",
+    stop_month %in% c("Dec", "Jan", "Feb") ~ "Winter"
+  ))
+  
+#categorize violation
+ct_pred <- categorize_violation(ct_pred)
+
+#drop search outcome and is arrested
+ct_pred <- ct_pred %>% select(-is_arrested)
+ct_pred <- ct_pred %>% select(-stop_outcome)
+
+#run model and make prediction
+final_preds <- predict.glm(mod.lasso, type="response", newdata=ct_pred)
+final_preds <- final_preds > 0.3566037 #convert probs to binary, adjust threshold here
+final_df <- data.frame(ct_pred$id, final_preds) 
+
+#save predictions along with ID as a csv file with id
+write.csv(final_df, file = "predictions.csv", row.names = FALSE)
+```
+
